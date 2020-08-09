@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from bluepy import btle
 from bluepy.btle import DefaultDelegate
 import time
@@ -13,6 +11,7 @@ import sys
 
 # BMS bluetooth addresses and their indexes
 bms_bt_addresses = ["A4:C1:38:E5:BC:FC"]
+post2db = False
 
 class BATTERY:
 	Total_voltage = 0
@@ -369,8 +368,9 @@ while True:
 			break;
 	print("")
 
-	pg = psycopg2.connect( database="grafana2", user="pi", password="raspberry", host="localhost")
-	pg_cursor = pg.cursor()
+	if post2db:
+		pg = psycopg2.connect( database="grafana2", user="pi", password="raspberry", host="localhost")
+		pg_cursor = pg.cursor()
 
 	for BMS in BMSs:
 		BMS.Evaluate()
@@ -378,18 +378,19 @@ while True:
 		if BMS.connected and BMS.iSamples>0:
 			print('======== Battery #', BMS.id, " ========", sep="")
 			BMS.Battery.Output()
-			BMS.Upload(pg_cursor, now_time)
+			if post2db: BMS.Upload(pg_cursor, now_time)
 		del BMS
 
 	del BMSs
 
-	query=( "INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity) " +
-			"SELECT time, 0, AVG(voltage), SUM(current_charge), SUM(current_discharge), SUM(remaining_capacity) FROM battery_minute_data " +
-			"WHERE time=\'"+now_time.strftime("%Y-%m-%d %H:%M") + "\' GROUP BY 1")
-	pg_cursor.execute(query)
+	if post2db:
+		query=( "INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity) " +
+				"SELECT time, 0, AVG(voltage), SUM(current_charge), SUM(current_discharge), SUM(remaining_capacity) FROM battery_minute_data " +
+				"WHERE time=\'"+now_time.strftime("%Y-%m-%d %H:%M") + "\' GROUP BY 1")
+		pg_cursor.execute(query)
 
-	pg.commit()
-	pg.close
+		pg.commit()
+		pg.close
 
 	os.system("sudo hciconfig hci0 reset")
 	print("sleep")
