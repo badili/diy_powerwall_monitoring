@@ -1,0 +1,37 @@
+version: '3.7'
+services:
+  db:
+    build:
+      context: .
+      dockerfile: ./docker/db/Dockerfile
+    container_name: grafana-db
+    restart: unless-stopped
+    ports:
+      - "9033:3306"
+    env_file:
+      - 'variables.env'
+    volumes:
+      - ./db_data:/var/lib/mysql:rw
+      - ./docker/db/grafana.cnf:/etc/mysql/conf.d/grafana.cnf
+    
+
+  grafana-service:
+    build:
+      context: .
+      dockerfile: ./docker/grafana/Dockerfile
+
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "9034:3000"
+    env_file:
+      - 'variables.env'
+      
+    depends_on:
+      - db
+
+
+volumes:
+  grafanadata:
+    driver: local
+  mysqldata:
