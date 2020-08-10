@@ -7,11 +7,15 @@ import psycopg2
 import datetime
 import os
 import sys
+import re
 
 
 # BMS bluetooth addresses and their indexes
-bms_bt_addresses = ["A4:C1:38:E5:BC:FC"]
+bms_bt_addresses = [{'name': '7s10p', 'addr': 'A4:C1:38:E5:BC:FC'}]
 post2db = False
+cells_in_series = 7
+sleep_time_between_connection_attempts = 3		# in seconds
+
 
 class BATTERY:
 	Total_voltage = 0
@@ -26,10 +30,11 @@ class BATTERY:
 	cell_b = 0
 
 	def __init__(self):
-		self.cell_v = [0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-		self.cell_b = [0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+		self.cell_v = [0 for a in range(cells_in_series)]
+		self.cell_b = [0 for a in range(cells_in_series)]
 
 	def DecodeMsg03( self, data ):
+		print("Battery stats")
 		self.Total_voltage = int.from_bytes(data[4:6], byteorder='big')/100.0
 		c = int.from_bytes(data[6:8], byteorder='big', signed=True)/100.0
 		if c>=0:
@@ -44,14 +49,26 @@ class BATTERY:
 		self.Cycles = int.from_bytes(data[12:14], byteorder='big', signed=True)
 		self.Balance = int.from_bytes(data[16:18], byteorder='big', signed=False)
 
-		#print( data[16:18] );
-		#print( self.Balance );
+		print(
+			"Decoded Message:\n\tBattery capacity: %f\n\tTotal Voltage: %fV\n\tCurrent charge = %f\n\tCurrent discharge = %f\n\tRemaining capacity = %f\n\tCycles = %d\n\tBalance: %f\n" % (
+				self.Typical_capacity,
+				self.Total_voltage,
+				self.Current_charge,
+				self.Current_discharge,
+				self.Remaining_capacity,
+				self.Cycles,
+				self.Balance
+			)
+		)
 
 		self.Protection = int.from_bytes(data[20:22], byteorder='big')
 
 	def DecodeMsg04( self, data ):
-		for i in range(0,14):
+		print("Cell voltages")
+		# print(data)
+		for i in range(0, cells_in_series):
 			self.cell_v[i] =  int.from_bytes(data[(4+i*2):(6+i*2)], byteorder='big')/1000.0
+			print("Cell%d = %fV" % (i, self.cell_v[i]))
 
 	def Output(self):
 		print("Total voltage: ", self.Total_voltage, "v     ", end="", sep="")
@@ -59,16 +76,16 @@ class BATTERY:
 		print("Capacity: ", self.Remaining_capacity , "Ah / ", self.Typical_capacity, "Ah   (", self.Cycles, " cycles)" )
 
 		print("              ", end='' )
-		for i in range(0,14):
+		for i in range(0, cells_in_series):
 			print( '{:5} '.format(i+1), end='' )
 		print("")
 
 		print("Cell voltages : ", end='' )
-		for i in range(0,14):
+		for i in range(0, cells_in_series):
 			print( '{:5} '.format(self.cell_v[i]), end='' )
 		print("")
 		print("Status:         ", end='' )
-		for i in range(0,14):
+		for i in range(0, cells_in_series):
 			if self.cell_b[i]>0:
 				print( "B ", end='')
 			else:
@@ -96,6 +113,7 @@ class ReadDelegate(btle.DefaultDelegate):
 		btle.DefaultDelegate.__init__(self)
 
 	def handleNotification(self, cHandle, data):
+		# print(data)
 		self.data = self.data + data
 		#print(" new data: ", binascii.b2a_hex(data), " complete: ", IsMsgComplete(read_data))
 		#print " got data: ", binascii.b2a_hex(data)
@@ -111,30 +129,65 @@ class BMS_class:
 	connected = 0
 	adr = ""
 	id = 0
+	writable_characteristics = []
+	data_characteristic = None
+	cmd03="DDA50300FFFD77"
+	cmd04="DDA50400FFFC77"
+	# cmd3="DDA50500FFFB77"
 
 	def connect(self, tries):
 		for tries in range(0,tries):
 			try:
 				self.bt_dev = btle.Peripheral(self.adr, btle.ADDR_TYPE_PUBLIC, 0)
-			except:
+				
+				# loop through the characteristics and test the writable ones
+				for svc in self.bt_dev.getServices():
+					# get the characteristics of this services
+					all_characteristics = svc.getCharacteristics()
+					
+					for characteristic in all_characteristics:
+						if re.search('WRITE', characteristic.propertiesToString()):
+							self.writable_characteristics.append(characteristic.getHandle())
+
+			except Exception as e:
+				print(str(e))
 				time.sleep(0.5)
 				continue
 			self.connected = True
 			break
 
 
-	def __init__(self, adr, id):
+	def __init__(self, adr, id, name=None):
 		self.adr = adr
 		self.id = id
+		print("Try and connect to the BMS. Try 5 times")
 		self.connect(5)
 		if not self.connected:
+			print("Couldn't connect to %s the BMS even after trying 5 times" % name if name else '')
 			return
-	
+		print("Connected to '%s'" % name if name else '')
+
 		self.Battery_id = id
 		self.BatterySamples = list()
 		self.Battery = BATTERY()
 		self.bt_RD = ReadDelegate()
 		self.bt_dev.withDelegate( self.bt_RD )
+
+
+	def determine_data_characteristic(self):
+		# determines the characteristic handle which we shall use to query the data from
+		for handle_id in self.writable_characteristics:
+			try:
+				# set the wait for a confirm notification that the write was successful 
+				self.bt_dev.writeCharacteristic(handle_id, bytes.fromhex(self.cmd03), True)
+				
+				# now save this handle and break from the loop
+				self.data_characteristic = handle_id
+				break
+			except Exception as e:
+				print(str(e))
+				continue
+
 
 	def CollectSample(self):
 		if not self.connected:
@@ -144,21 +197,7 @@ class BMS_class:
 			if not self.connected:
 				print("Failed")
 				return
-			print("OK")
-
-		#print("Services...")
-		#for svc in self.bt_dev.services:
-		#	print(str(svc))
-
-		#bms_uuid = "0000ff00-0000-1000-8000-00805f9b34fb"
-		#service1=self.bt_dev.getServiceByUUID( bms_uuid );
-
-		#print("Characteristics...")
-		#for ch in service1.getCharacteristics():
-		#	print(str(ch))
-
-		#cha_ff01 = service1.getCharacteristics(0xff01)[0]
-		#cha_ff02 = service1.getCharacteristics(0xff02)[0]
+			# print("OK")
 
 
 		cmd03="DDA50300FFFD77"
@@ -168,25 +207,30 @@ class BMS_class:
 		reply_ok = False
 		new_sample = BATTERY();
 		for i in range(0,5):
-			#print( "Sending command ", cmd03 )
+			print( "Sending command3 ", self.cmd03 )
+			# print(bytes.fromhex(cmd03))
 			self.bt_RD.data=b""
-			self.bt_dev.writeCharacteristic( 0x000d, bytes.fromhex(cmd03) )
+			self.bt_dev.writeCharacteristic( self.data_characteristic, bytes.fromhex(self.cmd03), True )
 			while self.bt_dev.waitForNotifications(0.2):
+				# print("waiting...")
 				continue
+			
 			if IsMsgComplete( self.bt_RD.data, 0x03 ):
 				reply_ok = True
-				#print(binascii.b2a_hex( self.bt_RD.data ))
+				print(binascii.b2a_hex( self.bt_RD.data ))
 				break;
 
 		if reply_ok:
+			# print("The reply is ok")
 			new_sample.DecodeMsg03( self.bt_RD.data )
 			reply_ok = False
 
 			for i in range(0,5):
-				#print( "Sending command ", cmd04 )
+				print( "Sending command4 ", cmd04 )
 				self.bt_RD.data=b""
-				self.bt_dev.writeCharacteristic( 0x000d, bytes.fromhex(cmd04) )
-				while self.bt_dev.waitForNotifications(0.2):
+				self.bt_dev.writeCharacteristic( self.data_characteristic, bytes.fromhex(cmd04), True )
+				# self.bt_dev.writeCharacteristic( 0x000d, bytes.fromhex(cmd04) )
+				while self.bt_dev.waitForNotifications(10):
 					continue
 				if IsMsgComplete( self.bt_RD.data, 0x04 ):
 					reply_ok = True
@@ -198,8 +242,7 @@ class BMS_class:
 				self.iSamples += 1
 				self.BatterySamples.append(new_sample)
 				print(".",end='')
-				sys.stdout.flush()
-
+				# sys.stdout.flush()
 
 	def EvaluateHelper(self,values,sanity_min,sanity_max, precision):
 		if not self.connected:
@@ -243,58 +286,49 @@ class BMS_class:
 			values.append( self.BatterySamples[i].Typical_capacity )
 		self.Battery.Typical_capacity = self.EvaluateHelper( values, 0,250, 2 );
 
-		for c in range(0,14):
+		for c in range(0, cells_in_series):
 			self.Battery.cell_b[c]=0
 			for i in range(0,self.iSamples):
 				self.Battery.cell_b[c] += (self.BatterySamples[i].Balance >> c) & 1
 
-		for c in range(0,14):
+		for c in range(0, cells_in_series):
 			values = []
 			for i in range(0,self.iSamples):
 				values.append( self.BatterySamples[i].cell_v[c] )
 			self.Battery.cell_v[c] = self.EvaluateHelper( values, 1,4.3, 3 );
 
 	def Upload(self, pg_cursor, now_time):
-		query=( "INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity, " +
-							"cell01_v, cell02_v, cell03_v, cell04_v, cell05_v, cell06_v, cell07_v, " +
-							"cell08_v, cell09_v, cell10_v, cell11_v, cell12_v, cell13_v, cell14_v, " +
-							"cell01_b, cell02_b, cell03_b, cell04_b, cell05_b, cell06_b, cell07_b, " +
-							"cell08_b, cell09_b, cell10_b, cell11_b, cell12_b, cell13_b, cell14_b ) VALUES ( " +
-							"\'"+now_time.strftime("%Y-%m-%d %H:%M")+"\', " +
-							str(self.Battery_id) + ", " +
-							str(self.Battery.Total_voltage*1000) + ", " +
-							str(self.Battery.Current_charge*1000) + ", " +
-							str(self.Battery.Current_discharge*1000) + ", " +
-							str(self.Battery.Remaining_capacity*1000) + ", " +
-							str(self.Battery.cell_v[0]*1000) + ", " +
-							str(self.Battery.cell_v[1]*1000) + ", " +
-							str(self.Battery.cell_v[2]*1000) + ", " +
-							str(self.Battery.cell_v[3]*1000) + ", " +
-							str(self.Battery.cell_v[4]*1000) + ", " +
-							str(self.Battery.cell_v[5]*1000) + ", " +
-							str(self.Battery.cell_v[6]*1000) + ", " +
-							str(self.Battery.cell_v[7]*1000) + ", " +
-							str(self.Battery.cell_v[8]*1000) + ", " +
-							str(self.Battery.cell_v[9]*1000) + ", " +
-							str(self.Battery.cell_v[10]*1000) + ", " +
-							str(self.Battery.cell_v[11]*1000) + ", " +
-							str(self.Battery.cell_v[12]*1000) + ", " +
-							str(self.Battery.cell_v[13]*1000) + ", " +
-							str(self.Battery.cell_b[0]) + ", " +
-							str(self.Battery.cell_b[1]) + ", " +
-							str(self.Battery.cell_b[2]) + ", " +
-							str(self.Battery.cell_b[3]) + ", " +
-							str(self.Battery.cell_b[4]) + ", " +
-							str(self.Battery.cell_b[5]) + ", " +
-							str(self.Battery.cell_b[6]) + ", " +
-							str(self.Battery.cell_b[7]) + ", " +
-							str(self.Battery.cell_b[8]) + ", " +
-							str(self.Battery.cell_b[9]) + ", " +
-							str(self.Battery.cell_b[10]) + ", " +
-							str(self.Battery.cell_b[11]) + ", " +
-							str(self.Battery.cell_b[12]) + ", " +
-							str(self.Battery.cell_b[13]) + " )" )
-		pg_cursor.execute(query)
+		cell_b = []
+		cell_v = []
+		col_names = ["cell%d" % i for i in range(cells_in_series)]
+		for i in range(cells_in_series): cell_v.append(str(self.Battery.cell_v[i]*1000))
+		for i in range(cells_in_series): cell_b.append(str(self.Battery.cell_b[i]*1000))
+
+		if post2db:
+			query=("INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity, %s ) " +
+					"VALUES ( " % ', '.join(col_names) +
+					"\'"+now_time.strftime("%Y-%m-%d %H:%M")+"\', " +
+					str(self.Battery_id) + ", " +
+					str(self.Battery.Total_voltage*1000) + ", " +
+					str(self.Battery.Current_charge*1000) + ", " +
+					str(self.Battery.Current_discharge*1000) + ", " +
+					str(self.Battery.Remaining_capacity*1000) + ", %s, %s" % (', '.join(cell_v), ', '.join(cell_b))
+			)
+			pg_cursor.execute(query)
+		else:
+			cell_data = (
+				now_time.strftime("%Y-%m-%d %H:%M"),
+				str(self.Battery_id),
+				str(self.Battery.Total_voltage*1000),
+				str(self.Battery.Current_charge*1000),
+				str(self.Battery.Current_discharge*1000),
+				str(self.Battery.Remaining_capacity*1000)
+			)
+			print(cell_data)
+			print(cell_v)
+			print("%s Bat: %s, V: %s, Charge: %s, Discharge: %s, Rem Cap: %s" % (cell_data) )
+			print("cell1    cell2    cell3    cell4    cell5    cell6    cell7")
+			print(cell_v)
 
 
 	def __del__(self):
@@ -326,27 +360,73 @@ def IsMsgComplete( data, cmd ):
 	return True
 
 
+class BMSDevice:
+	def __init__(self, adr, id_, name):
+		self.adr = adr
+		self.id = id_
+		self.name = name
+		self.connected = False
+		self.writable_characteristics = []
+		self.data_characteristic = None
+		self.cmd03 = "DDA50300FFFD77"
+		self.cmd04="DDA50400FFFC77"
+		# self.cmd3="DDA50500FFFB77"
+		
+	def connect(self, tries):
+		for tries in range(0, tries):
+			try:
+				# create the top level peripheral for this device
+				self.bt_dev = btle.Peripheral(self.adr, btle.ADDR_TYPE_PUBLIC, 0)
+				
+				# loop through the characteristics and test the writable ones
+				for svc in self.bt_dev.getServices():
+					# get the characteristics of this services
+					all_characteristics = svc.getCharacteristics()
+					
+					for characteristic in all_characteristics:
+						if re.search('WRITE', characteristic.propertiesToString()):
+							self.writable_characteristics.append(characteristic.getHandle())
+
+				# all is good, so alter the connected flag and exit the loop
+				self.connected = True
+				break
+			except btle.BTLEDisconnectError as e:
+				print("Bluetooth connect error.  Resetting.")
+				os.system("sudo hciconfig hci0 reset")
+				time.sleep(10)
+				continue
+			except Exception as e:
+				print("Some error %s: '%s'\n\tSleeping for %d seconds before retrying " % (self.name, str(e), sleep_time_between_connection_attempts))
+				time.sleep(sleep_time_between_connection_attempts)
+				continue
+
+
+
 while True:
 	print("Connecting...")
 
 	BMSs = []
 	# loop through the defined bms bt addresses and initialize their classes
 	ind = 1
-	for bt_add in bms_bt_addresses:
-		bms_c = BMS_class(bt_add, 1)
+	for bt in bms_bt_addresses:
+		bms_c = BMS_class(bt['addr'], 1, bt['name'])
 		BMSs.append(bms_c)
 
 	start_time = datetime.datetime.now()
 
 	print("Collecting samples...")
 	while True:
-		time.sleep(10)
+		time.sleep(3)
 		for BMS in BMSs:
 			try:
+				if BMS.data_characteristic is None:
+					BMS.determine_data_characteristic()
+
 				BMS.CollectSample()
-			except (btle.BTLEException,btle.BTLEDisconnectError):
+			except btle.BTLEDisconnectError as e:
 				#os.system("sudo systemctl stop bluetooth")
 				#os.system("sudo systemctl start bluetooth")
+				print(str(e))
 
 				print("Bluetooth disconnect error.  Resetting.")
 
@@ -356,9 +436,11 @@ while True:
 				BMS = BMS_class(BMS.adr,BMS.id)   # try reconnect
 				print("Reconnecting BMS#"+str(BMS.id) )
 				continue
+			except Exception as e:
+				print(str(e))
 
 		now_time = datetime.datetime.now()
-		sample_duration = datetime.timedelta(minutes=5)
+		sample_duration = datetime.timedelta(minutes=0.5)
 		#elapsed_time = now_time - start_time
 
 		# on every 5th minute, but minimum 1 minute elapsed
@@ -368,6 +450,7 @@ while True:
 			break;
 	print("")
 
+	pg_cursor = None
 	if post2db:
 		pg = psycopg2.connect( database="grafana2", user="pi", password="raspberry", host="localhost")
 		pg_cursor = pg.cursor()
@@ -378,19 +461,23 @@ while True:
 		if BMS.connected and BMS.iSamples>0:
 			print('======== Battery #', BMS.id, " ========", sep="")
 			BMS.Battery.Output()
-			if post2db: BMS.Upload(pg_cursor, now_time)
+			BMS.Upload(pg_cursor, now_time)
 		del BMS
 
 	del BMSs
 
+	query=( "INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity) " +
+			"SELECT time, 0, AVG(voltage), SUM(current_charge), SUM(current_discharge), SUM(remaining_capacity) FROM battery_minute_data " +
+			"WHERE time=\'"+now_time.strftime("%Y-%m-%d %H:%M") + "\' GROUP BY 1")
+
 	if post2db:
-		query=( "INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity) " +
-				"SELECT time, 0, AVG(voltage), SUM(current_charge), SUM(current_discharge), SUM(remaining_capacity) FROM battery_minute_data " +
-				"WHERE time=\'"+now_time.strftime("%Y-%m-%d %H:%M") + "\' GROUP BY 1")
 		pg_cursor.execute(query)
 
 		pg.commit()
 		pg.close
+	else:
+		# print(query)
+		print('')
 
 	os.system("sudo hciconfig hci0 reset")
 	print("sleep")
