@@ -38,6 +38,16 @@ Create the database powerwall
 
 5. To exit from the bluetooth interface type `quit`
 
+## Grafana installation
+A docker setup is configured to setup a grafana instance as well as a MySQL instance to save the collected data
+
+Once the db instance is up and running, connect to it, create a user on the database that can write data from the pi and grant the user all privileges on the default database
+Connect via the container `docker exec -t <db-instance> /bin/bash` or from the host `mysql -h localhost -P 9033 --protocol=tcp -u root -p`
+```
+create user 'youruser'@'%' identified by 'your-password';
+grant all privileges on powerwall.* to 'youruser'@'%';
+```
+
 ## Installation
 1. Clone the code `git clone https://github.com/badili/diy_powerwall_monitoring.git`
 
@@ -59,3 +69,7 @@ python3.7 -m venv env
 ## Resources
 1. [bluepy - a Bluetooth LE interface for Python](https://ianharvey.github.io/bluepy-doc/index.html)
 2. [Profile and user data over bluetooth](https://www.oreilly.com/library/view/getting-started-with/9781491900550/ch04.html#gatt_char_decl_attr)
+3. [Communication protocol](https://drive.google.com/file/d/0B3UXptx89r4NZ3VLTHlVS1ZGTTQ/view)
+4. [Php EpSolar Tracer](https://github.com/toggio/PhpEpsolarTracer)
+5. [Communication Interface for Tracer MT-5](https://github.com/xxv/tracer)
+6. [Generic Chinese Bluetooth BMS communication protocol](https://github.com/simat/BatteryMonitor/wiki/Generic-Chinese-Bluetooth-BMS-communication-protocol)
