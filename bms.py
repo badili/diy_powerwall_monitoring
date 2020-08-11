@@ -8,11 +8,15 @@ import datetime
 import os
 import sys
 import re
+import mysql.connector
 
+from raven import Client
+# sentry = Client(settings.SENTRY_DSN, environment=settings.ENV_ROLE)
 
 # BMS bluetooth addresses and their indexes
-bms_bt_addresses = [{'name': '7s10p', 'addr': 'A4:C1:38:E5:BC:FC'}]
+batteries = [{'id': 1, 'name': '7s10p', 'addr': 'A4:C1:38:E5:BC:FC'}]
 post2db = False
+saveDataOnline = True
 cells_in_series = 7
 sleep_time_between_connection_attempts = 3		# in seconds
 
@@ -28,6 +32,8 @@ class BATTERY:
 	Protection = 0
 	cell_v = 0
 	cell_b = 0
+	batt_time = None
+	cell_time = None
 
 	def __init__(self):
 		self.cell_v = [0 for a in range(cells_in_series)]
@@ -48,6 +54,8 @@ class BATTERY:
 		self.Typical_capacity = int.from_bytes(data[10:12], byteorder='big', signed=True)/100.0
 		self.Cycles = int.from_bytes(data[12:14], byteorder='big', signed=True)
 		self.Balance = int.from_bytes(data[16:18], byteorder='big', signed=False)
+		batt_stats_time = datetime.datetime.now()
+		self.batt_time = batt_stats_time.strftime("%Y-%m-%d %H:%M:%S")
 
 		print(
 			"Decoded Message:\n\tBattery capacity: %f\n\tTotal Voltage: %fV\n\tCurrent charge = %f\n\tCurrent discharge = %f\n\tRemaining capacity = %f\n\tCycles = %d\n\tBalance: %f\n" % (
@@ -69,6 +77,9 @@ class BATTERY:
 		for i in range(0, cells_in_series):
 			self.cell_v[i] =  int.from_bytes(data[(4+i*2):(6+i*2)], byteorder='big')/1000.0
 			print("Cell%d = %fV" % (i, self.cell_v[i]))
+
+		cells_v_time = datetime.datetime.now()
+		self.cells_time = cells_v_time.strftime("%Y-%m-%d %H:%M:%S")
 
 	def Output(self):
 		print("Total voltage: ", self.Total_voltage, "v     ", end="", sep="")
@@ -207,7 +218,7 @@ class BMS_class:
 		reply_ok = False
 		new_sample = BATTERY();
 		for i in range(0,5):
-			print( "Sending command3 ", self.cmd03 )
+			# print( "Sending command3 ", self.cmd03 )
 			# print(bytes.fromhex(cmd03))
 			self.bt_RD.data=b""
 			self.bt_dev.writeCharacteristic( self.data_characteristic, bytes.fromhex(self.cmd03), True )
@@ -217,7 +228,6 @@ class BMS_class:
 			
 			if IsMsgComplete( self.bt_RD.data, 0x03 ):
 				reply_ok = True
-				print(binascii.b2a_hex( self.bt_RD.data ))
 				break;
 
 		if reply_ok:
@@ -226,7 +236,7 @@ class BMS_class:
 			reply_ok = False
 
 			for i in range(0,5):
-				print( "Sending command4 ", cmd04 )
+				# print( "Sending command4 ", cmd04 )
 				self.bt_RD.data=b""
 				self.bt_dev.writeCharacteristic( self.data_characteristic, bytes.fromhex(cmd04), True )
 				# self.bt_dev.writeCharacteristic( 0x000d, bytes.fromhex(cmd04) )
@@ -265,6 +275,10 @@ class BMS_class:
 		for i in range(0,self.iSamples):
 			values.append( self.BatterySamples[i].Total_voltage )
 		self.Battery.Total_voltage = self.EvaluateHelper( values, 35,65, 2 );
+
+		# add the times
+		self.Battery.batt_time = self.BatterySamples[i].batt_time
+		self.Battery.cells_time = self.BatterySamples[i].cells_time
 
 		values = []
 		for i in range(0,self.iSamples):
@@ -315,6 +329,20 @@ class BMS_class:
 					str(self.Battery.Remaining_capacity*1000) + ", %s, %s" % (', '.join(cell_v), ', '.join(cell_b))
 			)
 			pg_cursor.execute(query)
+		elif saveDataOnline:
+			print("Saving the collected data to the remote db...")
+			print(cell_b)
+			# we are saving the data to the online database
+			batt_stats = (self.Battery_id, self.Battery.batt_time, self.Battery.Total_voltage, self.Battery.Current_charge, self.Battery.Current_discharge, self.Battery.Remaining_capacity, 0, 0.0)
+			print(batt_stats)
+			insert_cursor.execute(batt_status_q, batt_stats )
+
+			# now save the cell voltages
+			cells_v = [ (self.Battery_id, self.Battery.cells_time, i, self.Battery.cell_v[i]) for i in range(cells_in_series) ]
+			print(cells_v)
+			insert_cursor.executemany(cell_status_q, cells_v)
+			remote_conn.commit()
+			print("Saving to remote db finished...")
 		else:
 			cell_data = (
 				now_time.strftime("%Y-%m-%d %H:%M"),
@@ -401,15 +429,40 @@ class BMSDevice:
 				continue
 
 
+if saveDataOnline:
+	try:
+		print("Initiating connection to remote database...")
+		remote_conn = mysql.connector.connect(option_files='grafana-db-config')
+
+		# prepare the connection details
+		insert_cursor = remote_conn.cursor(prepared=True)
+		# batt_status_q = "INSERT INTO batt_status(batt_id, datetime, voltage, charge, discharge, rem_capacity, cycles, balance) VALUES(%d, %s, %f, %f, %f, %f, %d, %f)"
+		batt_status_q = "INSERT INTO batt_status(batt_id, datetime, voltage, charge, discharge, rem_capacity, cycles, balance) VALUES(%s, %s, %s, %s, %s, %s, %s, %s)"
+		cell_status_q = "INSERT INTO cell_status(batt_id, datetime, cell_no, cell_v) VALUES(?, ?, ?, ?)"
+
+		# update the batteries with info from the database
+		cursor = remote_conn.cursor(dictionary=True)
+		# cursor.execute("SELECT id from batt_info where bms_mac = %(mac)s")
+		cursor.execute("SELECT id, name, bms_mac from batt_info where is_active = 1")
+		batteries = []
+		for row in cursor:
+			batteries.append({'id': row['id'], 'name': row['name'], 'addr': row['bms_mac']})
+
+		print("Remote database connection succeeded...\n\n")
+	except Exception as e:
+		print(str(e))
+else:
+	remote_conn = None
+
 
 while True:
-	print("Connecting...")
+	print("Starting the main loop...")
 
 	BMSs = []
 	# loop through the defined bms bt addresses and initialize their classes
 	ind = 1
-	for bt in bms_bt_addresses:
-		bms_c = BMS_class(bt['addr'], 1, bt['name'])
+	for bt in batteries:
+		bms_c = BMS_class(bt['addr'], bt['id'], bt['name'])
 		BMSs.append(bms_c)
 
 	start_time = datetime.datetime.now()
@@ -448,23 +501,27 @@ while True:
 		#if now_time.minute >= start_time.minute+5:
 		if now_time >= (start_time + sample_duration):
 			break;
+
 	print("")
 
-	pg_cursor = None
-	if post2db:
-		pg = psycopg2.connect( database="grafana2", user="pi", password="raspberry", host="localhost")
-		pg_cursor = pg.cursor()
+	try:
+		pg_cursor = None
+		if post2db:
+			pg = psycopg2.connect( database="grafana2", user="pi", password="raspberry", host="localhost")
+			pg_cursor = pg.cursor()
 
-	for BMS in BMSs:
-		BMS.Evaluate()
+		for BMS in BMSs:
+			BMS.Evaluate()
 
-		if BMS.connected and BMS.iSamples>0:
-			print('======== Battery #', BMS.id, " ========", sep="")
-			BMS.Battery.Output()
-			BMS.Upload(pg_cursor, now_time)
-		del BMS
+			if BMS.connected and BMS.iSamples>0:
+				print('======== Battery #', BMS.id, " ========", sep="")
+				BMS.Battery.Output()
+				BMS.Upload(pg_cursor, now_time)
+			del BMS
 
-	del BMSs
+		del BMSs
+	except Exception as e:
+		print(str(e))
 
 	query=( "INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity) " +
 			"SELECT time, 0, AVG(voltage), SUM(current_charge), SUM(current_discharge), SUM(remaining_capacity) FROM battery_minute_data " +
