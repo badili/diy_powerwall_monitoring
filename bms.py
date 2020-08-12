@@ -20,6 +20,10 @@ saveDataOnline = True
 cells_in_series = 7
 sleep_time_between_connection_attempts = 3		# in seconds
 
+sanityMinimumVoltage = 24
+sanityMaximumVoltage = 29.4
+systemPrecision = 3				# Allow 3 decimal places
+
 
 class BATTERY:
 	Total_voltage = 0
@@ -254,7 +258,7 @@ class BMS_class:
 				print(".",end='')
 				# sys.stdout.flush()
 
-	def EvaluateHelper(self,values,sanity_min,sanity_max, precision):
+	def EvaluateHelper(self, values, sanity_min, sanity_max, precision):
 		if not self.connected:
 			return
 		count = 0
@@ -274,7 +278,7 @@ class BMS_class:
 		values = []
 		for i in range(0,self.iSamples):
 			values.append( self.BatterySamples[i].Total_voltage )
-		self.Battery.Total_voltage = self.EvaluateHelper( values, 35,65, 2 );
+		self.Battery.Total_voltage = self.EvaluateHelper( values, sanityMinimumVoltage, sanityMaximumVoltage, systemPrecision);
 
 		# add the times
 		self.Battery.batt_time = self.BatterySamples[i].batt_time
@@ -283,22 +287,22 @@ class BMS_class:
 		values = []
 		for i in range(0,self.iSamples):
 			values.append( self.BatterySamples[i].Current_charge )
-		self.Battery.Current_charge = self.EvaluateHelper( values, -50,50, 2 );
+		self.Battery.Current_charge = self.EvaluateHelper( values, -50, 50, systemPrecision);
 
 		values = []
 		for i in range(0,self.iSamples):
 			values.append( self.BatterySamples[i].Current_discharge )
-		self.Battery.Current_discharge = self.EvaluateHelper( values, -50,50, 2 );
+		self.Battery.Current_discharge = self.EvaluateHelper( values, -50, 50, systemPrecision);
 
 		values = []
 		for i in range(0,self.iSamples):
 			values.append( self.BatterySamples[i].Remaining_capacity )
-		self.Battery.Remaining_capacity = self.EvaluateHelper( values, 0,250, 2 );
+		self.Battery.Remaining_capacity = self.EvaluateHelper( values, 0, 250, systemPrecision);
 
 		values = []
 		for i in range(0,self.iSamples):
 			values.append( self.BatterySamples[i].Typical_capacity )
-		self.Battery.Typical_capacity = self.EvaluateHelper( values, 0,250, 2 );
+		self.Battery.Typical_capacity = self.EvaluateHelper( values, 0, 250, systemPrecision);
 
 		for c in range(0, cells_in_series):
 			self.Battery.cell_b[c]=0
@@ -309,7 +313,7 @@ class BMS_class:
 			values = []
 			for i in range(0,self.iSamples):
 				values.append( self.BatterySamples[i].cell_v[c] )
-			self.Battery.cell_v[c] = self.EvaluateHelper( values, 1,4.3, 3 );
+			self.Battery.cell_v[c] = self.EvaluateHelper( values, 1, 4.3, systemPrecision);
 
 	def Upload(self, pg_cursor, now_time):
 		cell_b = []
