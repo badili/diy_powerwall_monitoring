@@ -1,3 +1,4 @@
 variables.env
 grafana-db-config
 .DS_Store
+pazuri.cfg

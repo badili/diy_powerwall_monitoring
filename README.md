@@ -61,7 +61,8 @@ python3.7 -m venv env
 ```
 
 3. Activate the virtual environment `source env/bin/activate`
-4. Install the pre-requisite modules `pip install -r requirements.txt`
+4. Modify the requirements.txt file appropriately. If you are using PostgreSQL make sure to remove the comment tag
+5. Install the pre-requisite modules `pip install -r requirements.txt`
 
 ## Running the scripts
 5. xxx
