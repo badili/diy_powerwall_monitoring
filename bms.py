@@ -10,7 +10,6 @@ import re
 import json
 import mysql.connector
 import paho.mqtt.publish as mqtt
-
 import signal
 
 from raven import Client
@@ -408,25 +407,25 @@ class BMS_class:
 
 # THIS FUNCTION HAS BEEN MOVED TO CLASS MessageProcessing.check_command_reply
 def IsMsgComplete( data, cmd ):
-	if len(data)<6:   # impossibly short
-		 return False
-	if data[1] != cmd:   # reply to wrong command
-		return False
-	if data[3]+7 != len(data):  # length mismatch
-		return False
-	if data[0] != 0xdd or data[-1]!=0x77:  # no start / end byte
-		return False
-	if data[2] != 0:  # not a "OK" response
-		return False
+    if len(data)<6:   # impossibly short
+         return False
+    if data[1] != cmd:   # reply to wrong command
+        return False
+    if data[3]+7 != len(data):  # length mismatch
+        return False
+    if data[0] != 0xdd or data[-1]!=0x77:  # no start / end byte
+        return False
+    if data[2] != 0:  # not a "OK" response
+        return False
 
-	checksum=0;
-	for i in range(2,data[3]+4):
-		checksum = checksum + data[i]
-	checksum = (checksum^0xffff)+1
-	if ( data[-3] != checksum>>8 ) or ( data[-2] != checksum&0xff ):
-		return False
+    checksum=0;
+    for i in range(2,data[3]+4):
+        checksum = checksum + data[i]
+    checksum = (checksum^0xffff)+1
+    if ( data[-3] != checksum>>8 ) or ( data[-2] != checksum&0xff ):
+        return False
 
-	return True
+    return True
 
 
 # THIS FUNCTION WILL BE DEPRECATED
