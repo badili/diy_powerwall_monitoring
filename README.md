@@ -21,7 +21,7 @@ scan on
 ```
 
 SQLite installation
-`sudo apt-get install sqlite3`
+`sudo apt-get install sqlite3 git python3-venv`
 
 Create the database powerwall
 `sqlite3 powerwall`
