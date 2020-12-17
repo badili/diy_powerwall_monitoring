@@ -62,10 +62,11 @@ python3.7 -m venv env
 
 3. Activate the virtual environment `source env/bin/activate`
 4. Modify the requirements.txt file appropriately. If you are using PostgreSQL make sure to remove the comment tag
-5. Install the pre-requisite modules `pip install -r requirements.txt`
+5. Modify the config file appropriately. A sample config file `demo_config.cfg` has been provided
+6. Install the pre-requisite modules `pip install -r requirements.txt`
 
 ## Running the scripts
-5. xxx
+7. xxx
 
 ## Resources
 1. [bluepy - a Bluetooth LE interface for Python](https://ianharvey.github.io/bluepy-doc/index.html)

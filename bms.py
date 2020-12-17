@@ -9,6 +9,7 @@ import sys
 import re
 import json
 import mysql.connector
+import paho.mqtt.publish as mqtt
 
 import signal
 
@@ -25,6 +26,7 @@ USE_SENTRY = False
 ENV_ROLE = cfg['MAIN']['ENV_ROLE']
 SAVE_DATA_ONLINE = cfg['SAVE'].getboolean('SAVEDATAONLINE')
 SAVE_2_POSTGRES = cfg['SAVE'].getboolean('USE_LOCAL_POSTGRES')
+PUBLISH_2_MQTT = cfg['SAVE'].getboolean('PUBLISH_2_MQTT')
 
 if cfg['MAIN'].getboolean('USE_SENTRY'):
 	dsn = 'https://%s:%s@%s/%s?verify_ssl=0' % (cfg['SENTRY']['USER'], cfg['SENTRY']['PASS'], cfg['SENTRY']['URL'], cfg['SENTRY']['PROJID'])
@@ -154,7 +156,6 @@ class BATTERY:
 
 		print("")
 		print("Protection: ", self.Protection, "   Vmin/max: ", min(self.cell_v),"V / ", max(self.cell_v), "V   diff:", round((max(self.cell_v)-min(self.cell_v))*1000,0), "mV", sep="")
-
 
 
 # THIS CLASS WILL BE DEPRECATED
@@ -428,12 +429,14 @@ def IsMsgComplete( data, cmd ):
 	return True
 
 
+# THIS FUNCTION WILL BE DEPRECATED
 # Register a handler for the timeout
 def handler(signum, frame):
 	print("Stuck... lets add this data to be sent later..")
 	raise TimeoutException("Stuck somewhere...")
 
 
+# THIS SIGNAL CALL WILL BE DEPRECATED
 # Register the signal function handler and define a timeout 
 # We might not need this!!
 signal.signal(signal.SIGALRM, handler)
@@ -702,8 +705,11 @@ class Database:
 		if SAVE_DATA_ONLINE:
 			self.save_data_online(bms_addr, data, cmd)
 		
-		elif SAVE_2_POSTGRES:
+		if SAVE_2_POSTGRES:
 			self.save_data2postgres(bms_addr, data, cmd)
+
+		if PUBLISH_2_MQTT:
+			self.publish_2_mqtt(bms_addr, data, cmd)
 
 	def save_data_online(self, bms_addr, data, cmd):
 		try:
@@ -714,6 +720,9 @@ class Database:
 				if batt['addr'] == bms_addr:
 					if cmd == 0x03:
 						# saving the battery information
+						# SAMPLE DATA
+						# {'total_valtage': 26.14, 'current': -4.22, 'charge_status': 'Discharging', 'charge_current': 0, 'discharge_current': -4.22, 'remaining_capacity': 0.0, 'batt_capacity': 30.0, 'cycles': 2, 'is_balanced': 0, 'protection': 0, 'batt_time': '2020-12-17 19:12:44'}
+						# END OF SAMPLE DATA
 						print("\n%s: Saving the battery (%s) data to the remote db..." % (data['batt_time'], bms_addr))
 						batt_stats = (batt['id'], data['batt_time'], data['total_valtage'], data['charge_current'], data['discharge_current'], data['remaining_capacity'], data['cycles'], data['is_balanced'])
 
@@ -722,6 +731,9 @@ class Database:
 
 					elif cmd == 0x04:
 						# saving the cells information
+						# SAMPLE DATA
+						# {0: 3.691, 1: 3.736, 2: 3.739, 3: 3.739, 4: 3.742, 5: 3.731, 6: 3.763, 'cells_time': '2020-12-17 19:12:48'}
+						# END OF SAMPLE DATA
 						print("\n%s: Saving the cells data to the remote db..." % data['cells_time'])
 						self.cells_v = [ (batt['id'], data['cells_time'], i, data[i]) for i in range(int(cfg['BATT']['CELLS_IN_SERIES'])) ]
 
@@ -749,6 +761,32 @@ class Database:
 			if ENV_ROLE == 'DEV': print(str(e))
 			if USE_SENTRY: sentry.captureException()
 
+	def publish_2_mqtt():
+		try:
+			# dragonflyuk please add the code for publishing to mqtt
+			# 
+            print("Publishing collected data to the MQTT server...")
+            # we are saving the data to the online database
+            batt_stats = [{'topic':mqttTopic+(self.Name)+"/id", 'payload':self.Battery_id},
+                          {'topic':mqttTopic+(self.Name)+"/time", 'payload':self.Battery.batt_time}, 
+                          {'topic':mqttTopic+(self.Name)+"/total_voltage", 'payload':self.Battery.Total_voltage}, 
+                          {'topic':mqttTopic+(self.Name)+"/charge_current", 'payload':self.Battery.Current_charge}, 
+                          {'topic':mqttTopic+(self.Name)+"/discharge_current", 'payload':self.Battery.Current_discharge}, 
+                          {'topic':mqttTopic+(self.Name)+"/remaining_capacity", 'payload':self.Battery.Remaining_capacity}]
+            print(batt_stats)
+            mqtt.multiple(batt_stats, hostname = cfg['MQTT']['HOST'], auth = cfg['MQTT']['AUTH'])
+
+            # now save the cell voltages
+            cells_v = []
+            for i in range(cells_in_series):
+                cells_v.append({'topic':mqttTopic+(self.Name)+"/cell"+str(i)+"_voltage", 'payload':self.Battery.cell_v[i]})
+            print(cells_v)
+            mqtt.multiple(cells_v, hostname=mqttHostname, auth=mqttAuth)
+            print("Publish to MQTT finished...")
+
+		except Exception as e:
+			if ENV_ROLE == 'DEV': print(str(e))
+			if USE_SENTRY: sentry.captureException()
 
 
 while True:
@@ -785,10 +823,10 @@ while True:
 
 
 """
+THIS IS THE OLD LOOP... IT WILL BE DELETED
+
 
 timed_out_data = []
-
-
 
 while True:
 	print("Starting the main loop...")
