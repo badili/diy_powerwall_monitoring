@@ -3,18 +3,21 @@ from bluepy.btle import DefaultDelegate
 import time
 import binascii
 import collections
-import psycopg2
+# import psycopg2
 import datetime
 import os
 import sys
 import re
 import mysql.connector
 
+import signal
+
 from raven import Client
 # sentry = Client(settings.SENTRY_DSN, environment=settings.ENV_ROLE)
 
 # BMS bluetooth addresses and their indexes
 batteries = [{'id': 1, 'name': '7s10p', 'addr': 'A4:C1:38:E5:BC:FC'}]
+epever_addr = '2C:AB:33:9F:7B:85'
 post2db = False
 saveDataOnline = True
 cells_in_series = 7
@@ -23,6 +26,11 @@ sleep_time_between_connection_attempts = 3		# in seconds
 sanityMinimumVoltage = 24
 sanityMaximumVoltage = 29.4
 systemPrecision = 3				# Allow 3 decimal places
+functionTimeout = 10			# Only allow 10 seconds for any function to get stuck
+
+
+class TimeoutException(Exception):
+	pass
 
 
 class BATTERY:
@@ -334,19 +342,29 @@ class BMS_class:
 			)
 			pg_cursor.execute(query)
 		elif saveDataOnline:
-			print("Saving the collected data to the remote db...")
-			print(cell_b)
+			print("  %s: Saving the collected data to the remote db..." % self.Battery.batt_time)
+			
 			# we are saving the data to the online database
-			batt_stats = (self.Battery_id, self.Battery.batt_time, self.Battery.Total_voltage, self.Battery.Current_charge, self.Battery.Current_discharge, self.Battery.Remaining_capacity, 0, 0.0)
-			print(batt_stats)
-			insert_cursor.execute(batt_status_q, batt_stats )
-
+			self.batt_stats = (self.Battery_id, self.Battery.batt_time, self.Battery.Total_voltage, self.Battery.Current_charge, self.Battery.Current_discharge, self.Battery.Remaining_capacity, 0, 0.0)
+			# print(batt_stats)
+			
 			# now save the cell voltages
-			cells_v = [ (self.Battery_id, self.Battery.cells_time, i, self.Battery.cell_v[i]) for i in range(cells_in_series) ]
-			print(cells_v)
-			insert_cursor.executemany(cell_status_q, cells_v)
+			self.cells_v = [ (self.Battery_id, self.Battery.cells_time, i, self.Battery.cell_v[i]) for i in range(cells_in_series) ]
+			self.cells_b = [ (self.Battery_id, self.Battery.cells_time, i, self.Battery.cell_b[i]) for i in range(cells_in_series) if self.Battery.cell_b[i] != 0 ]
+
+			remote_conn = mysql.connector.connect(option_files='grafana-db-config')
+			insert_cursor = remote_conn.cursor(prepared=True)
+
+			# save the data
+			insert_cursor.execute( batt_status_q, self.batt_stats )
+			insert_cursor.executemany( cell_status_q, self.cells_v )
+			insert_cursor.executemany( cell_balancing_q, self.cells_b )
+			
 			remote_conn.commit()
 			print("Saving to remote db finished...")
+			
+			insert_cursor.close()
+			remote_conn.close()
 		else:
 			cell_data = (
 				now_time.strftime("%Y-%m-%d %H:%M"),
@@ -391,6 +409,15 @@ def IsMsgComplete( data, cmd ):
 
 	return True
 
+
+# Register a handler for the timeout
+def handler(signum, frame):
+	print("Stuck... lets add this data to be sent later..")
+	raise TimeoutException("Stuck somewhere...")
+
+
+# Register the signal function handler and define a timeout 
+signal.signal(signal.SIGALRM, handler)
 
 class BMSDevice:
 	def __init__(self, adr, id_, name):
@@ -443,6 +470,7 @@ if saveDataOnline:
 		# batt_status_q = "INSERT INTO batt_status(batt_id, datetime, voltage, charge, discharge, rem_capacity, cycles, balance) VALUES(%d, %s, %f, %f, %f, %f, %d, %f)"
 		batt_status_q = "INSERT INTO batt_status(batt_id, datetime, voltage, charge, discharge, rem_capacity, cycles, balance) VALUES(%s, %s, %s, %s, %s, %s, %s, %s)"
 		cell_status_q = "INSERT INTO cell_status(batt_id, datetime, cell_no, cell_v) VALUES(?, ?, ?, ?)"
+		cell_balancing_q = "INSERT INTO cell_balancing(batt_id, datetime, cell_no, cell_a) VALUES(?, ?, ?, ?)"
 
 		# update the batteries with info from the database
 		cursor = remote_conn.cursor(dictionary=True)
@@ -453,11 +481,14 @@ if saveDataOnline:
 			batteries.append({'id': row['id'], 'name': row['name'], 'addr': row['bms_mac']})
 
 		print("Remote database connection succeeded...\n\n")
+		cursor.close()
+		remote_conn.close()
 	except Exception as e:
 		print(str(e))
 else:
 	remote_conn = None
 
+timed_out_data = []
 
 while True:
 	print("Starting the main loop...")
@@ -520,12 +551,44 @@ while True:
 			if BMS.connected and BMS.iSamples>0:
 				print('======== Battery #', BMS.id, " ========", sep="")
 				BMS.Battery.Output()
+				# put a timer to monitor this function to avoid chocking
+				signal.alarm(functionTimeout)
 				BMS.Upload(pg_cursor, now_time)
+				signal.alarm(0)						# cancel the timeout if the function returns successfully
 			del BMS
 
 		del BMSs
+	
+	except TimeoutException as e:
+		print("Not saved data....")
+
+		print(BMS.batt_stats)
+		print(BMS.cells_v)
+		print(BMS.cells_b)
+
+		with open("stuck_data.txt", "a") as outfile:
+			outfile.write("bs:%s\n" % ",".join([str(x) for x in BMS.batt_stats]))
+			outfile.write("cv:%s\n" % ",".join([str(x) for x in BMS.cells_v]))
+			outfile.write("cb:%s\n" % ",".join([str(x) for x in BMS.cells_b]))
+			outfile.write("\n")
+
+	except mysql.connector.Error as e:
+		print("There was an error while connecting to the database: %s" % str(e))
+		with open("stuck_data.txt", "a") as outfile:
+			outfile.write("bs:%s\n" % ",".join([str(x) for x in BMS.batt_stats]))
+			outfile.write("cv:%s\n" % ",".join([str(x) for x in BMS.cells_v]))
+			outfile.write("cb:%s\n" % ",".join([str(x) for x in BMS.cells_b]))
+			outfile.write("\n")
+		pass
+
 	except Exception as e:
-		print(str(e))
+		print("Something went wrong: %s" % str(e))
+		with open("stuck_data.txt", "a") as outfile:
+			outfile.write("bs:%s\n" % ",".join([str(x) for x in BMS.batt_stats]))
+			outfile.write("cv:%s\n" % ",".join([str(x) for x in BMS.cells_v]))
+			outfile.write("cb:%s\n" % ",".join([str(x) for x in BMS.cells_b]))
+			outfile.write("\n")
+		pass
 
 	query=( "INSERT INTO battery_minute_data (time, battery_id, voltage, current_charge, current_discharge, remaining_capacity) " +
 			"SELECT time, 0, AVG(voltage), SUM(current_charge), SUM(current_discharge), SUM(remaining_capacity) FROM battery_minute_data " +

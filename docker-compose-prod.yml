@@ -30,8 +30,12 @@ services:
     depends_on:
       - db
 
+    volumes:
+      - ./grafana_data:/var/lib/grafana
+
 
 volumes:
   grafanadata:
     driver: local
   mysqldata:
+  grafana_data:
